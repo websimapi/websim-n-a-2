@@ -1,0 +1,14 @@
+{
+  "name": "{{APP_ID}}",
+  "productName": "{{PRODUCT_NAME}}",
+  "version": "1.0.0",
+  "description": "Desktop app for {{URL}}",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "{{ELECTRON_VERSION}}"
+  }
+}
+

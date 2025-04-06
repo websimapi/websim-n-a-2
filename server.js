@@ -8,128 +8,107 @@ const PORT = 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const APPS_DIR = path.join(__dirname, 'apps');
 const PACKAGED_DIR = path.join(__dirname, 'packaged');
+const TEMPLATES_DIR = path.join(__dirname, 'templates'); 
+const ASSETS_DIR = path.join(__dirname, 'assets'); 
+
+function replacePlaceholders(content, replacements) {
+    let result = content;
+    for (const key in replacements) {
+        const regex = new RegExp(`{{${key}}}`, 'g');
+        result = result.replace(regex, replacements[key]);
+    }
+    return result;
+}
 
 const server = http.createServer((req, res) => {
-    // Serve static index.html
     if (req.method === 'GET' && req.url === '/') {
         const indexPath = path.join(PUBLIC_DIR, 'index.html');
         fs.readFile(indexPath, 'utf8', (err, content) => {
             if (err) {
-                console.error("Error reading index.html:", err);
-                res.writeHead(500, { 'Content-Type': 'text/plain' });
-                res.end('Internal Server Error');
+                const defaultIndexPath = path.join(PUBLIC_DIR, 'default-index.html');
+                fs.readFile(defaultIndexPath, 'utf8', (defaultErr, defaultContent) => {
+                    if (defaultErr) {
+                        console.error("Error reading default-index.html:", defaultErr);
+                        res.writeHead(500, { 'Content-Type': 'text/plain' });
+                        res.end('Internal Server Error - Cannot find index.html or default-index.html');
+                    } else {
+                        res.writeHead(200, { 'Content-Type': 'text/html' });
+                        res.end(defaultContent);
+                    }
+                });
                 return;
             }
             res.writeHead(200, { 'Content-Type': 'text/html' });
             res.end(content);
         });
     }
-    // Handle packaging request
     else if (req.method === 'POST' && req.url === '/package') {
         let body = '';
         req.on('data', chunk => {
             body += chunk.toString();
         });
         req.on('end', async () => {
-            let appId; // Declare appId here to be accessible in catch block
+            let appId; 
+            let appDir;
+            let outputDir;
+            let zipPath;
             try {
                 const { url } = JSON.parse(body);
                 if (!url || !(url.startsWith('http://') || url.startsWith('https://'))) {
                    throw new Error('Invalid URL provided. Must start with http:// or https://');
                 }
 
-                appId = `app_${Date.now()}`; // Assign value here
-                const appDir = path.join(APPS_DIR, appId);
-                const outputDir = path.join(PACKAGED_DIR, appId); // Directory for unpacked builds
-                const zipPath = path.join(PACKAGED_DIR, `${appId}.zip`); // Final zip file path
+                appId = `app_${Date.now()}`; 
+                appDir = path.join(APPS_DIR, appId);
+                outputDir = path.join(PACKAGED_DIR, appId); 
+                zipPath = path.join(PACKAGED_DIR, `${appId}.zip`); 
 
-                // 1. Create directories (already ensured on startup, but good practice)
                 await fs.promises.mkdir(appDir, { recursive: true });
                 await fs.promises.mkdir(outputDir, { recursive: true });
 
+                const mainJsTemplatePath = path.join(TEMPLATES_DIR, 'electron-main.js.template');
+                const packageJsonTemplatePath = path.join(TEMPLATES_DIR, 'electron-package.json.template');
 
-                // 2. Create basic Electron app files
-                const mainJsContent = `
-const { app, BrowserWindow } = require('electron');
-const path = require('path');
+                const [mainJsTemplate, packageJsonTemplate] = await Promise.all([
+                    fs.promises.readFile(mainJsTemplatePath, 'utf8'),
+                    fs.promises.readFile(packageJsonTemplatePath, 'utf8')
+                ]);
 
-function createWindow () {
-  const mainWindow = new BrowserWindow({
-    width: 1024, // Slightly larger default size
-    height: 768,
-    webPreferences: {
-      // preload: path.join(__dirname, 'preload.js') // Optional: if you need preload scripts
-      // Security consideration: It's generally safer to keep nodeIntegration false
-      // and rely on contextBridge in a preload script if Node.js access is needed in the renderer.
-      // nodeIntegration: false,
-      // contextIsolation: true,
-    },
-    // Set an icon (optional) - place an icon.png in the appDir
-    // icon: path.join(__dirname, 'icon.png')
-  });
+                const productName = `WebApp_${url.replace(/^(https?:\/\/)?(www\.)?/, '').split(/[:\/]/)[0]}`; 
+                const electronVersion = "^28.0.0"; 
 
-  mainWindow.loadURL('${url}'); // Load the target URL
+                const mainJsContent = replacePlaceholders(mainJsTemplate, { URL: url });
+                const packageJsonContent = replacePlaceholders(packageJsonTemplate, {
+                    APP_ID: appId,
+                    PRODUCT_NAME: productName,
+                    URL: url,
+                    ELECTRON_VERSION: electronVersion
+                });
 
-  // Improve UX: Maximize window on start (optional)
-  // mainWindow.maximize();
+                await Promise.all([
+                    fs.promises.writeFile(path.join(appDir, 'main.js'), mainJsContent),
+                    fs.promises.writeFile(path.join(appDir, 'package.json'), packageJsonContent)
+                ]);
 
-  // Open the DevTools (optional)
-  // mainWindow.webContents.openDevTools();
-}
-
-app.whenReady().then(() => {
-  createWindow();
-
-  app.on('activate', function () {
-    // On macOS it's common to re-create a window in the app when the
-    // dock icon is clicked and there are no other windows open.
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-});
-
-// Quit when all windows are closed, except on macOS. There, it's common
-// for applications and their menu bar to stay active until the user quits
-// explicitly with Cmd + Q.
-app.on('window-all-closed', function () {
-  if (process.platform !== 'darwin') app.quit();
-});
-                `;
-                await fs.promises.writeFile(path.join(appDir, 'main.js'), mainJsContent);
-
-                // Basic package.json for the Electron app
-                const packageJsonContent = JSON.stringify({
-                    name: appId,
-                    productName: `WebApp_${url.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0]}`, // Better product name
-                    version: '1.0.0',
-                    description: `Desktop app for ${url}`,
-                    main: 'main.js',
-                    scripts: {
-                        start: 'electron .'
-                        // Add build scripts later if using electron-builder/packager directly
-                    },
-                    devDependencies: {
-                        electron: "^28.0.0" // Use a recent stable version
+                const iconSourcePath = path.join(ASSETS_DIR, 'icon.ico'); 
+                const iconDestPath = path.join(appDir, 'icon.ico');
+                try {
+                    if (fs.existsSync(iconSourcePath)) {
+                        await fs.promises.copyFile(iconSourcePath, iconDestPath);
+                        console.log(`[${appId}] Copied icon.ico`);
                     }
-                }, null, 2);
-                await fs.promises.writeFile(path.join(appDir, 'package.json'), packageJsonContent);
+                } catch (iconError) {
+                    console.warn(`[${appId}] Warning: Could not copy icon file: ${iconError.message}`);
+                }
 
-                // Optional: Create empty preload.js
-                // await fs.promises.writeFile(path.join(appDir, 'preload.js'), '// Preload script (optional)');
-
-                // 3. Install dependencies (electron)
                 console.log(`[${appId}] Installing Electron...`);
                 await new Promise((resolve, reject) => {
-                    // Use npm ci for potentially faster and more reliable installs if package-lock.json exists (npm install generates it)
-                    exec('npm install', { cwd: appDir, timeout: 300000 }, (error, stdout, stderr) => { // Increased timeout
+                    exec('npm install --omit=dev', { cwd: appDir, timeout: 300000 }, (error, stdout, stderr) => { 
                         if (error) {
                             console.error(`[${appId}] npm install error: ${stderr}`);
-                            // Try to provide more specific feedback
                             let detail = stderr;
-                            if (stderr.includes('EACCES')) {
-                                detail = 'Permission error during npm install. Check file permissions.';
-                            } else if (stderr.includes('ENOTFOUND') || stderr.includes('ETIMEDOUT')) {
-                                detail = 'Network error during npm install. Check internet connection and proxy settings.';
-                            }
+                            if (stderr.includes('EACCES')) detail = 'Permission error during npm install.';
+                            else if (stderr.includes('ENOTFOUND') || stderr.includes('ETIMEDOUT')) detail = 'Network error during npm install.';
                             return reject(new Error(`Failed to install Electron: ${detail}`));
                         }
                         console.log(`[${appId}] npm install stdout: ${stdout}`);
@@ -138,21 +117,20 @@ app.on('window-all-closed', function () {
                 });
                 console.log(`[${appId}] Electron installed.`);
 
-
-                // 4. Package the app using electron-packager
                 console.log(`[${appId}] Packaging app...`);
-                // Platform options: win32, linux, darwin (macOS)
-                // Arch options: x64, arm64, ia32 etc.
-                const packageCmd = `npx electron-packager . --platform=win32,linux --arch=x64 --out="${outputDir}" --overwrite --icon="${path.join(__dirname, 'assets', 'icon.ico')}"`; // Reference an icon if available
-                // Note: Add --icon for macOS builds: --icon="path/to/icon.icns" if building for darwin
+                let iconArg = '';
+                if (fs.existsSync(iconDestPath)) {
+                    iconArg = `--icon="${iconDestPath}"`; 
+                } else if (fs.existsSync(iconSourcePath)) { 
+                    iconArg = `--icon="${iconSourcePath}"`;
+                }
+                const packageCmd = `npx electron-packager . "${productName}" --platform=win32,linux --arch=x64 --out="${outputDir}" --overwrite ${iconArg}`;
                 await new Promise((resolve, reject) => {
-                    exec(packageCmd, { cwd: appDir, timeout: 600000 }, (error, stdout, stderr) => { // Increased timeout
+                    exec(packageCmd, { cwd: appDir, timeout: 600000 }, (error, stdout, stderr) => { 
                         if (error) {
                             console.error(`[${appId}] electron-packager error: ${stderr}`);
                             let detail = stderr;
-                             if (stderr.includes('Unable to download')) {
-                                detail = 'Network error during Electron download for packaging. Check internet connection.';
-                            }
+                            if (stderr.includes('Unable to download')) detail = 'Network error during Electron download for packaging.';
                             return reject(new Error(`Failed to package app: ${detail}`));
                         }
                         console.log(`[${appId}] electron-packager stdout: ${stdout}`);
@@ -161,92 +139,77 @@ app.on('window-all-closed', function () {
                 });
                 console.log(`[${appId}] App packaged.`);
 
-                 // 5. Zip the packaged output directory
                 console.log(`[${appId}] Zipping packaged app...`);
                 const output = fs.createWriteStream(zipPath);
-                const archive = archiver('zip', { zlib: { level: 9 } }); // Optimal compression
+                const archive = archiver('zip', { zlib: { level: 9 } }); 
 
                 output.on('close', async () => {
                     const zipSizeBytes = archive.pointer();
                     console.log(`[${appId}] Zip file created: ${zipPath} (${(zipSizeBytes / (1024*1024)).toFixed(2)} MB)`);
 
-                    // Clean up intermediate directories *after* zip is confirmed closed
                     try {
-                         console.log(`[${appId}] Cleaning up source directory: ${appDir}`);
-                         await fs.promises.rm(appDir, { recursive: true, force: true });
-                         console.log(`[${appId}] Cleaning up intermediate build directory: ${outputDir}`);
-                         await fs.promises.rm(outputDir, { recursive: true, force: true });
-                     } catch (cleanupErr) {
-                         console.warn(`[${appId}] Warning during cleanup: ${cleanupErr.message}`);
-                     }
+                        console.log(`[${appId}] Cleaning up source directory: ${appDir}`);
+                        await fs.promises.rm(appDir, { recursive: true, force: true });
+                        console.log(`[${appId}] Cleaning up intermediate build directory: ${outputDir}`);
+                        await fs.promises.rm(outputDir, { recursive: true, force: true });
+                    } catch (cleanupErr) {
+                        console.warn(`[${appId}] Warning during cleanup: ${cleanupErr.message}`);
+                    }
 
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ downloadUrl: `/download/${path.basename(zipPath)}` })); // Use path.basename for safety
+                    res.end(JSON.stringify({ downloadUrl: `/download/${path.basename(zipPath)}` })); 
                 });
 
                 archive.on('warning', (err) => {
-                    if (err.code === 'ENOENT') {
-                        console.warn(`[${appId}] Archiver warning: ${err.message}`); // Log file not found warnings
-                    } else {
-                         console.error(`[${appId}] Archiver warning: ${err}`);
-                        // Consider if other warnings should reject the promise
-                    }
+                    if (err.code === 'ENOENT') console.warn(`[${appId}] Archiver warning: ${err.message}`);
+                    else console.error(`[${appId}] Archiver warning: ${err}`);
                 });
 
                 archive.on('error', (err) => {
-                     console.error(`[${appId}] Archiver error: ${err}`);
-                    // Ensure response isn't sent twice if headers already sent
+                    console.error(`[${appId}] Archiver error: ${err}`);
                     if (!res.headersSent) {
                         res.writeHead(500, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ message: `Zipping failed: ${err.message}` }));
                     }
-                     // Attempt cleanup even on zip error
-                     fs.promises.rm(appDir, { recursive: true, force: true }).catch(console.error);
-                     fs.promises.rm(outputDir, { recursive: true, force: true }).catch(console.error);
-                     fs.promises.unlink(zipPath).catch(console.error); // Delete potentially incomplete zip
+                    if (appDir) fs.promises.rm(appDir, { recursive: true, force: true }).catch(console.error);
+                    if (outputDir) fs.promises.rm(outputDir, { recursive: true, force: true }).catch(console.error);
+                    if (zipPath) fs.promises.unlink(zipPath).catch(console.error);
                 });
 
                 archive.pipe(output);
-                // Add the entire contents of the output directory (containing platform-specific builds)
-                archive.directory(outputDir, false); // Add directory contents directly to zip root
-                await archive.finalize(); // Finalize the archive
+                archive.directory(outputDir, false); 
+                await archive.finalize(); 
 
 
             } catch (error) {
                 console.error(`[${appId || 'N/A'}] Packaging error:`, error);
-                 if (!res.headersSent) {
+                if (!res.headersSent) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ message: `Packaging failed: ${error.message}` }));
-                 }
-                 // Clean up potentially partially created directories on error
-                if (appId) { // Use the appId captured earlier
-                    const appDir = path.join(APPS_DIR, appId);
-                    const outputDir = path.join(PACKAGED_DIR, appId);
-                    const zipPath = path.join(PACKAGED_DIR, `${appId}.zip`);
-                    fs.promises.rm(appDir, { recursive: true, force: true }).catch(err => console.error(`Cleanup error (appDir): ${err.message}`));
-                    fs.promises.rm(outputDir, { recursive: true, force: true }).catch(err => console.error(`Cleanup error (outputDir): ${err.message}`));
-                    fs.promises.unlink(zipPath).catch(err => { if (err.code !== 'ENOENT') console.error(`Cleanup error (zipPath): ${err.message}`);}); // Ignore if zip doesn't exist
+                }
+                if (appId) { 
+                    if (appDir) fs.promises.rm(appDir, { recursive: true, force: true }).catch(err => console.error(`Cleanup error (appDir): ${err.message}`));
+                    if (outputDir) fs.promises.rm(outputDir, { recursive: true, force: true }).catch(err => console.error(`Cleanup error (outputDir): ${err.message}`));
+                    if (zipPath) fs.promises.unlink(zipPath).catch(err => { if (err.code !== 'ENOENT') console.error(`Cleanup error (zipPath): ${err.message}`);}); 
                 }
             }
         });
 
     }
-    // Handle packaged app download request
     else if (req.method === 'GET' && req.url.startsWith('/download/')) {
         const requestedFilename = req.url.split('/download/')[1];
-        // Basic sanitization: prevent directory traversal
         const safeFilename = path.basename(requestedFilename);
-        if (safeFilename !== requestedFilename || !safeFilename.endsWith('.zip')) {
-             res.writeHead(400, { 'Content-Type': 'text/plain' });
-             res.end('Invalid filename.');
-             return;
+        if (safeFilename !== requestedFilename || !safeFilename.endsWith('.zip') || !safeFilename.startsWith('app_')) { 
+            res.writeHead(400, { 'Content-Type': 'text/plain' });
+            res.end('Invalid filename.');
+            return;
         }
 
         const filePath = path.join(PACKAGED_DIR, safeFilename);
 
         fs.stat(filePath, (err, stats) => {
             if (err || !stats.isFile()) {
-                console.error(`Download request for non-existent file: ${filePath}`, err);
+                console.error(`Download request for non-existent file: ${filePath}`, err ? err.message : 'Not a file');
                 res.writeHead(404, { 'Content-Type': 'text/plain' });
                 res.end('File not found or is not accessible.');
                 return;
@@ -259,281 +222,157 @@ app.on('window-all-closed', function () {
             });
             const readStream = fs.createReadStream(filePath);
 
-             // Error handling for the stream
-             readStream.on('error', (streamErr) => {
-                 console.error(`Error reading file for download ${filePath}:`, streamErr);
-                 // Can't change headers now, but can end the response abruptly.
-                 res.end();
-             });
+            readStream.on('error', (streamErr) => {
+                console.error(`Error reading file for download ${filePath}:`, streamErr);
+                res.end(); 
+            });
 
             readStream.pipe(res);
 
-             // Clean up the zip file after the download finishes or connection closes
-             req.on('close', () => { // Handle client closing connection early
-                  console.log(`Connection closed for ${safeFilename}. Cleaning up.`);
-                  fs.promises.unlink(filePath)
-                      .then(() => console.log(`Deleted ${filePath} after client disconnect.`))
-                      .catch(unlinkErr => console.error(`Error deleting ${filePath} after disconnect:`, unlinkErr));
-             });
+            const cleanupDownload = () => {
+                console.log(`Initiating cleanup for ${safeFilename}.`);
+                readStream.destroy(); 
+                fs.promises.unlink(filePath)
+                    .then(() => console.log(`Deleted ${filePath} after download attempt.`))
+                    .catch(unlinkErr => {
+                        if (unlinkErr.code !== 'ENOENT') { 
+                            console.error(`Error deleting ${filePath}:`, unlinkErr);
+                        }
+                    });
+            };
 
-             readStream.on('close', () => {
-                 console.log(`Download stream closed for ${safeFilename}. Initiating cleanup.`);
-                 // Ensure file is deleted after stream finishes
-                 fs.promises.unlink(filePath)
-                     .then(() => console.log(`Deleted ${filePath} after successful download.`))
-                     .catch(unlinkErr => console.error(`Error deleting ${filePath} after download:`, unlinkErr));
-                // Note: Intermediate build folders (e.g., packaged/app_12345) were already deleted after zipping.
-                // The source app folder (e.g., apps/app_12345) was also deleted after zipping.
-             });
+            req.on('close', () => {
+                console.log(`Connection closed for ${safeFilename}.`);
+                cleanupDownload();
+            });
+
+            res.on('finish', () => { 
+                console.log(`Download finished for ${safeFilename}.`);
+                cleanupDownload();
+            });
         });
     }
-    // Handle server code download request
     else if (req.method === 'GET' && req.url === '/download-server') {
-        // Create a temporary zip containing server.js and package.json
-        const tempServerZip = path.join(__dirname, `server-code_${Date.now()}.zip`); // Use temp name
+        const tempServerZip = path.join(__dirname, `server-code_${Date.now()}.zip`); 
         const output = fs.createWriteStream(tempServerZip);
         const archive = archiver('zip', { zlib: { level: 9 } });
 
         output.on('close', () => {
             console.log(`Server code zip created temporarily: ${tempServerZip}`);
             fs.stat(tempServerZip, (err, stats) => {
-                 if (err) {
+                if (err) {
                     console.error("Error stating temporary server zip:", err);
                     res.writeHead(500, { 'Content-Type': 'text/plain' });
                     res.end('Error creating server code zip.');
-                    fs.promises.unlink(tempServerZip).catch(console.error); // Clean up temp file on error
+                    fs.promises.unlink(tempServerZip).catch(console.error); 
                     return;
-                 }
-                 res.writeHead(200, {
-                     'Content-Type': 'application/zip',
-                     'Content-Disposition': 'attachment; filename="server-code.zip"', // User-friendly name
-                     'Content-Length': stats.size
-                 });
-                 const readStream = fs.createReadStream(tempServerZip);
-                 readStream.pipe(res);
-                 readStream.on('close', () => {
-                      // Clean up the temporary server zip file after download
-                      fs.promises.unlink(tempServerZip).catch(console.error);
-                 });
-                 readStream.on('error', (streamErr) => {
-                     console.error(`Error streaming server code zip:`, streamErr);
-                     fs.promises.unlink(tempServerZip).catch(console.error); // Clean up on stream error
-                 });
+                }
+                res.writeHead(200, {
+                    'Content-Type': 'application/zip',
+                    'Content-Disposition': 'attachment; filename="server-code.zip"', 
+                    'Content-Length': stats.size
+                });
+                const readStream = fs.createReadStream(tempServerZip);
+                readStream.pipe(res);
+
+                const cleanupServerZip = () => {
+                    readStream.destroy();
+                    fs.promises.unlink(tempServerZip).catch(err => {
+                        if (err.code !== 'ENOENT') console.error(`Error deleting server temp zip: ${err.message}`);
+                    });
+                };
+                res.on('finish', cleanupServerZip);
+                readStream.on('error', (streamErr) => {
+                    console.error(`Error streaming server code zip:`, streamErr);
+                    cleanupServerZip(); 
+                });
             });
         });
 
         archive.on('error', (err) => {
             console.error('Error creating server code zip:', err);
-             if (!res.headersSent) {
+            if (!res.headersSent) {
                 res.writeHead(500, { 'Content-Type': 'text/plain' });
                 res.end('Error creating server code zip.');
-             }
-             fs.promises.unlink(tempServerZip).catch(console.error); // Clean up temp file on archive error
+            }
+            fs.promises.unlink(tempServerZip).catch(console.error); 
         });
 
         archive.pipe(output);
-        archive.file(path.join(__dirname, 'server.js'), { name: 'server.js' });
-        const packageJsonPath = path.join(__dirname, 'package.json');
 
-        // Add package.json, create minimal if not found
-        if (fs.existsSync(packageJsonPath)) {
-            archive.file(packageJsonPath, { name: 'package.json' });
+        archive.file(path.join(__dirname, 'server.js'), { name: 'server.js' });
+        archive.file(path.join(__dirname, 'package.json'), { name: 'package.json' });
+        archive.directory(path.join(__dirname, 'public'), 'public');
+        archive.directory(path.join(__dirname, 'templates'), 'templates');
+        if (fs.existsSync(ASSETS_DIR)) {
+            archive.directory(ASSETS_DIR, 'assets');
         } else {
-             console.warn("package.json not found, creating a minimal one for the download.");
-             const minimalPackageJson = JSON.stringify({
-                name: "website-packager-server",
-                version: "1.0.0",
-                description: "Node.js server to package websites into Electron apps",
-                main: "server.js",
-                scripts: {
-                  "start": "node server.js",
-                  "install-deps": "npm install" // Added install script hint
-                },
-                dependencies: {
-                  "archiver": "^6.0.0" // Match installed or latest
-                },
-                devDependencies: {
-                  "electron-packager": "^17.0.0" // Match installed or latest
-                },
-                 engines: {
-                    "node": ">=16.0.0" // Good practice
-                  }
-              }, null, 2);
-             archive.append(minimalPackageJson, { name: 'package.json' });
+            archive.append('', { name: 'assets/' });
         }
+
         archive.finalize();
 
     }
-    // Handle other requests
-     else {
+    else {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         res.end('Not Found');
     }
 });
 
-// Ensure necessary directories exist on startup
 Promise.all([
     fs.promises.mkdir(PUBLIC_DIR, { recursive: true }),
     fs.promises.mkdir(APPS_DIR, { recursive: true }),
-    fs.promises.mkdir(PACKAGED_DIR, { recursive: true })
+    fs.promises.mkdir(PACKAGED_DIR, { recursive: true }),
+    fs.promises.mkdir(TEMPLATES_DIR, { recursive: true }),
+    fs.promises.mkdir(ASSETS_DIR, { recursive: true }) 
 ]).then(() => {
-    // Check if index.html exists, create a basic one if not
     const indexPath = path.join(PUBLIC_DIR, 'index.html');
-    if (!fs.existsSync(indexPath)) {
-        console.log("index.html not found in public directory, creating a default one.");
-        const defaultIndexContent = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Website to App Packager</title>
-    <style>
-        body { font-family: sans-serif; padding: 20px; background-color: #f4f4f4; color: #333; max-width: 800px; margin: 20px auto; }
-        h1, h2 { color: #333; border-bottom: 1px solid #ccc; padding-bottom: 5px; }
-        label { display: block; margin-bottom: 5px; font-weight: bold; }
-        input[type="url"] { width: 95%; max-width: 400px; padding: 10px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; font-size: 1em; }
-        button { padding: 12px 20px; background-color: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; transition: background-color 0.2s; }
-        button:hover { background-color: #218838; }
-        button:disabled { background-color: #aaa; cursor: not-allowed; }
-        #status { margin-top: 20px; font-weight: bold; padding: 10px; border-radius: 4px; }
-        #status.success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        #status.error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        #status.info { background-color: #e2e3e5; color: #383d41; border: 1px solid #d6d8db; }
-        #downloadLink { display: none; margin-top: 15px; padding: 10px 15px; background-color: #007bff; color: white; text-decoration: none; border-radius: 4px; transition: background-color 0.2s; }
-        #downloadLink:hover { background-color: #0056b3; }
-        .section { background-color: #fff; padding: 20px; margin-top: 20px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-    </style>
-</head>
-<body>
-    <h1>Website to Desktop App Packager</h1>
+    const defaultIndexPath = path.join(PUBLIC_DIR, 'default-index.html');
+    const mainTemplatePath = path.join(TEMPLATES_DIR, 'electron-main.js.template');
+    const pkgTemplatePath = path.join(TEMPLATES_DIR, 'electron-package.json.template');
 
-    <div class="section">
-        <h2>Create App</h2>
-        <form id="packageForm">
-            <label for="urlInput">Enter Website URL:</label>
-            <input type="url" id="urlInput" name="url" required placeholder="https://example.com">
-            <button type="submit" id="packageButton">Package App</button>
-        </form>
-        <div id="status">Enter a URL and click "Package App".</div>
-        <a id="downloadLink" href="#" download>Download Packaged App (.zip)</a>
-    </div>
+    const checks = [];
 
-    <div class="section">
-        <h2>Download Server Code</h2>
-        <p>Click the button below to download the Node.js server code (server.js and package.json) needed to run this packager yourself.</p>
-        <button onclick="downloadServerCode()">Download Server Code</button>
-    </div>
-
-    <script>
-        const form = document.getElementById('packageForm');
-        const statusDiv = document.getElementById('status');
-        const downloadLink = document.getElementById('downloadLink');
-        const urlInput = document.getElementById('urlInput');
-        const packageButton = document.getElementById('packageButton');
-
-        form.addEventListener('submit', async (event) => {
-            event.preventDefault();
-            statusDiv.textContent = 'Packaging starting... This may take several minutes (especially the first time). Please wait.';
-            statusDiv.className = 'info'; // Reset classes, add info class
-            downloadLink.style.display = 'none';
-            downloadLink.href = '#'; // Reset href
-            packageButton.disabled = true; // Disable button during processing
-            urlInput.disabled = true;
-
-            const url = urlInput.value;
-
-            try {
-                const response = await fetch('/package', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url })
-                });
-
-                // Get response body regardless of ok status to provide details
-                const responseBody = await response.text();
-                let data;
-                try {
-                    data = JSON.parse(responseBody);
-                } catch (parseError) {
-                    // If parsing fails, the response body was likely not JSON (e.g., plain text error)
-                    if (!response.ok) {
-                         throw new Error(responseBody || `Server responded with status ${response.status}`);
-                    } else {
-                        // Should not happen for a successful JSON response, but handle defensively
-                        throw new Error("Received non-JSON success response from server.");
-                    }
-                }
-
-                if (!response.ok) {
-                    throw new Error(data.message || `Packaging failed with status ${response.status}.`);
-                }
-
-
-                statusDiv.textContent = 'Packaging successful! Your download should appear below.';
-                statusDiv.className = 'success';
-                downloadLink.href = data.downloadUrl;
-                // Extract suggested filename from URL if possible, otherwise use a default
-                const filename = data.downloadUrl.split('/').pop() || 'packaged-app.zip';
-                downloadLink.download = filename;
-                downloadLink.style.display = 'inline-block'; // Use inline-block for better layout
-
-            } catch (error) {
-                console.error('Packaging error:', error);
-                statusDiv.textContent = `Error: ${error.message}`;
-                statusDiv.className = 'error';
-            } finally {
-                 packageButton.disabled = false; // Re-enable button
-                 urlInput.disabled = false;
-            }
-        });
-
-        async function downloadServerCode() {
-             const button = event.target;
-             button.disabled = true; // Disable button during download attempt
-             button.textContent = 'Downloading...';
-             try {
-                const response = await fetch('/download-server');
-                if (!response.ok) {
-                    throw new Error(`Failed to download server code (${response.status} ${response.statusText})`);
-                }
-                const blob = await response.blob();
-                const downloadUrl = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.style.display = 'none';
-                a.href = downloadUrl;
-                // Extract filename from Content-Disposition header if possible, otherwise default
-                const disposition = response.headers.get('content-disposition');
-                let filename = 'server-code.zip';
-                if (disposition && disposition.indexOf('attachment') !== -1) {
-                    const filenameRegex = /filename[^;=\\n]*=((['"]).*?\\2|[^;\\n]*)/;
-                    const matches = filenameRegex.exec(disposition);
-                    if (matches != null && matches[1]) {
-                      filename = matches[1].replace(/['"]/g, '');
-                    }
-                }
-                a.download = filename;
-                document.body.appendChild(a);
-                a.click();
-                window.URL.revokeObjectURL(downloadUrl);
-                document.body.removeChild(a);
-            } catch (error) {
-                console.error('Server code download error:', error);
-                alert(`Error downloading server code: ${error.message}`);
-            } finally {
-                 button.disabled = false; // Re-enable button
-                 button.textContent = 'Download Server Code';
-            }
-        }
-    </script>
-</body>
-</html>
-`;
-        fs.writeFileSync(indexPath, defaultIndexContent);
-        console.log(`Created default ${indexPath}`);
+    if (!fs.existsSync(indexPath) && fs.existsSync(defaultIndexPath)) {
+        console.log(`index.html not found in public directory, copying from default-index.html.`);
+        checks.push(fs.promises.copyFile(defaultIndexPath, indexPath));
+    } else if (!fs.existsSync(indexPath) && !fs.existsSync(defaultIndexPath)) {
+        console.error("CRITICAL: public/index.html and public/default-index.html are both missing.");
     }
 
-    // Start the server after setup
+    if (!fs.existsSync(mainTemplatePath)) {
+        console.log(`Creating default ${path.basename(mainTemplatePath)}.`);
+        const defaultMainTemplate = `
+const { app, BrowserWindow } = require('electron');
+function createWindow () {
+  const mainWindow = new BrowserWindow({ width: 800, height: 600 });
+  mainWindow.loadURL('{{URL}}');
+}
+app.whenReady().then(createWindow);
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() });
+`;
+        checks.push(fs.promises.writeFile(mainTemplatePath, defaultMainTemplate.trim()));
+    }
+
+    if (!fs.existsSync(pkgTemplatePath)) {
+        console.log(`Creating default ${path.basename(pkgTemplatePath)}.`);
+        const defaultPkgTemplate = `
+{
+  "name": "{{APP_ID}}",
+  "productName": "{{PRODUCT_NAME}}",
+  "version": "1.0.0",
+  "description": "App for {{URL}}",
+  "main": "main.js",
+  "scripts": { "start": "electron ." },
+  "devDependencies": { "electron": "{{ELECTRON_VERSION}}" }
+}
+`;
+        checks.push(fs.promises.writeFile(pkgTemplatePath, defaultPkgTemplate.trim()));
+    }
+
+    return Promise.all(checks);
+
+}).then(() => {
     server.listen(PORT, () => {
         console.log(`Server listening on port ${PORT}`);
         console.log(`Access the packager at http://localhost:${PORT}`);
@@ -542,15 +381,15 @@ Promise.all([
         console.log('Packaging may take time, especially on first run or slow connections.');
     });
 }).catch(err => {
-    console.error("Failed to create necessary directories or start server:", err);
+    console.error("Failed to perform initial setup or start server:", err);
     process.exit(1);
 });
 
-// Graceful shutdown - try to clean up temp folders
 async function cleanupAndExit() {
     console.log("\nShutting down server and cleaning up temporary files...");
+    server.close(() => console.log("HTTP server closed.")); 
+
     try {
-        // Only remove contents, not the directories themselves, as they are needed on restart
         const cleanDir = async (dir) => {
             try {
                 const entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -560,7 +399,7 @@ async function cleanupAndExit() {
                 }));
                 console.log(`Cleaned contents of ${dir}`);
             } catch (err) {
-                if (err.code !== 'ENOENT') { // Ignore if directory doesn't exist
+                if (err.code !== 'ENOENT') { 
                     console.error(`Error cleaning ${dir}:`, err);
                 }
             }
@@ -569,7 +408,6 @@ async function cleanupAndExit() {
         await Promise.all([
             cleanDir(APPS_DIR),
             cleanDir(PACKAGED_DIR),
-            // Clean up any leftover temp zip files in root
             fs.promises.readdir(__dirname).then(files =>
                 Promise.all(files
                     .filter(f => f.startsWith('server-code_') && f.endsWith('.zip'))
@@ -585,12 +423,9 @@ async function cleanupAndExit() {
     }
 }
 
-process.on('SIGINT', cleanupAndExit); // Handle Ctrl+C
-process.on('SIGTERM', cleanupAndExit); // Handle kill commands
+process.on('SIGINT', cleanupAndExit); 
+process.on('SIGTERM', cleanupAndExit); 
 
-// Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Consider exiting or implementing more robust error handling/reporting
-  // process.exit(1); // Uncomment to exit on unhandled rejection
 });
