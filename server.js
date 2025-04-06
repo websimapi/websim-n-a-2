@@ -422,7 +422,7 @@ Promise.all([
     <div class="section">
         <h2>Download Server Code</h2>
         <p>Click the button below to download the Node.js server code (server.js and package.json) needed to run this packager yourself.</p>
-        <button onclick="downloadServerCode(event)">Download Server Code</button> 
+        <button onclick="downloadServerCode()">Download Server Code</button>
     </div>
 
     <script>
@@ -435,10 +435,10 @@ Promise.all([
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
             statusDiv.textContent = 'Packaging starting... This may take several minutes (especially the first time). Please wait.';
-            statusDiv.className = 'info'; 
+            statusDiv.className = 'info'; // Reset classes, add info class
             downloadLink.style.display = 'none';
-            downloadLink.href = '#'; 
-            packageButton.disabled = true; 
+            downloadLink.href = '#'; // Reset href
+            packageButton.disabled = true; // Disable button during processing
             urlInput.disabled = true;
 
             const url = urlInput.value;
@@ -450,14 +450,17 @@ Promise.all([
                     body: JSON.stringify({ url })
                 });
 
+                // Get response body regardless of ok status to provide details
                 const responseBody = await response.text();
                 let data;
                 try {
                     data = JSON.parse(responseBody);
                 } catch (parseError) {
+                    // If parsing fails, the response body was likely not JSON (e.g., plain text error)
                     if (!response.ok) {
                          throw new Error(responseBody || `Server responded with status ${response.status}`);
                     } else {
+                        // Should not happen for a successful JSON response, but handle defensively
                         throw new Error("Received non-JSON success response from server.");
                     }
                 }
@@ -470,24 +473,24 @@ Promise.all([
                 statusDiv.textContent = 'Packaging successful! Your download should appear below.';
                 statusDiv.className = 'success';
                 downloadLink.href = data.downloadUrl;
+                // Extract suggested filename from URL if possible, otherwise use a default
                 const filename = data.downloadUrl.split('/').pop() || 'packaged-app.zip';
                 downloadLink.download = filename;
-                downloadLink.style.display = 'inline-block'; 
+                downloadLink.style.display = 'inline-block'; // Use inline-block for better layout
 
             } catch (error) {
                 console.error('Packaging error:', error);
                 statusDiv.textContent = `Error: ${error.message}`;
                 statusDiv.className = 'error';
             } finally {
-                 packageButton.disabled = false; 
+                 packageButton.disabled = false; // Re-enable button
                  urlInput.disabled = false;
             }
         });
 
-        async function downloadServerCode(event) { 
+        async function downloadServerCode() {
              const button = event.target;
-             button.disabled = true; 
-             const originalText = button.textContent; 
+             button.disabled = true; // Disable button during download attempt
              button.textContent = 'Downloading...';
              try {
                 const response = await fetch('/download-server');
@@ -499,6 +502,7 @@ Promise.all([
                 const a = document.createElement('a');
                 a.style.display = 'none';
                 a.href = downloadUrl;
+                // Extract filename from Content-Disposition header if possible, otherwise default
                 const disposition = response.headers.get('content-disposition');
                 let filename = 'server-code.zip';
                 if (disposition && disposition.indexOf('attachment') !== -1) {
@@ -517,8 +521,8 @@ Promise.all([
                 console.error('Server code download error:', error);
                 alert(`Error downloading server code: ${error.message}`);
             } finally {
-                 button.disabled = false; 
-                 button.textContent = originalText; 
+                 button.disabled = false; // Re-enable button
+                 button.textContent = 'Download Server Code';
             }
         }
     </script>
@@ -546,6 +550,7 @@ Promise.all([
 async function cleanupAndExit() {
     console.log("\nShutting down server and cleaning up temporary files...");
     try {
+        // Only remove contents, not the directories themselves, as they are needed on restart
         const cleanDir = async (dir) => {
             try {
                 const entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -555,7 +560,7 @@ async function cleanupAndExit() {
                 }));
                 console.log(`Cleaned contents of ${dir}`);
             } catch (err) {
-                if (err.code !== 'ENOENT') { 
+                if (err.code !== 'ENOENT') { // Ignore if directory doesn't exist
                     console.error(`Error cleaning ${dir}:`, err);
                 }
             }
@@ -564,6 +569,7 @@ async function cleanupAndExit() {
         await Promise.all([
             cleanDir(APPS_DIR),
             cleanDir(PACKAGED_DIR),
+            // Clean up any leftover temp zip files in root
             fs.promises.readdir(__dirname).then(files =>
                 Promise.all(files
                     .filter(f => f.startsWith('server-code_') && f.endsWith('.zip'))
@@ -579,12 +585,12 @@ async function cleanupAndExit() {
     }
 }
 
-process.on('SIGINT', cleanupAndExit); 
-process.on('SIGTERM', cleanupAndExit); 
+process.on('SIGINT', cleanupAndExit); // Handle Ctrl+C
+process.on('SIGTERM', cleanupAndExit); // Handle kill commands
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
   // Consider exiting or implementing more robust error handling/reporting
-  // process.exit(1); 
+  // process.exit(1); // Uncomment to exit on unhandled rejection
 });
