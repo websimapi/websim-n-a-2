@@ -1,0 +1,709 @@
+{
+  "name": "website-packager-server",
+  "version": "1.0.0",
+  "description": "Node.js server to package websites into Electron apps using electron-packager",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "electron",
+    "packager",
+    "website",
+    "desktop",
+    "app"
+  ],
+  "author": "AI Assistant",
+  "license": "ISC",
+  "dependencies": {
+    "archiver": "^6.0.0"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-packager": "^17.1.2"
+  },
+   "engines": {
+    "node": ">=16.0.0"
+  }
+}
+`````` server.js
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const archiver = require('archiver');
+const { exec } = require('child_process');
+const url = require('url'); // To parse URL query parameters if needed later
+const { randomBytes } = require('crypto'); // For unique IDs
+
+const PORT = 3000;
+const APPS_DIR = path.join(__dirname, 'apps');
+const PACKAGED_DIR = path.join(__dirname, 'packaged');
+
+// Helper function to run shell commands
+function runCommand(command, options) {
+    return new Promise((resolve, reject) => {
+        console.log(`Executing: ${command} in ${options.cwd || __dirname}`);
+        exec(command, options, (error, stdout, stderr) => {
+            if (error) {
+                console.error(`Error executing command: ${command}\n${stderr}`);
+                return reject(new Error(`Command failed: ${stderr}`));
+            }
+            console.log(`Command output: ${stdout}`);
+            if (stderr) {
+                console.warn(`Command stderr: ${stderr}`);
+            }
+            resolve(stdout);
+        });
+    });
+}
+
+// Helper function for robust cleanup
+async function cleanup(appId) {
+    const appDir = path.join(APPS_DIR, appId);
+    const outputDir = path.join(PACKAGED_DIR, appId);
+    const zipPath = path.join(PACKAGED_DIR, `${appId}.zip`);
+
+    console.log(`Cleaning up resources for ${appId}...`);
+    try {
+        await fs.promises.rm(appDir, { recursive: true, force: true });
+        console.log(`Removed ${appDir}`);
+    } catch (err) {
+        console.warn(`Warning: Could not remove ${appDir}: ${err.message}`);
+    }
+    try {
+        await fs.promises.rm(outputDir, { recursive: true, force: true });
+        console.log(`Removed ${outputDir}`);
+    } catch (err) {
+        console.warn(`Warning: Could not remove ${outputDir}: ${err.message}`);
+    }
+    try {
+        // Check if zip file exists before attempting deletion
+        if (fs.existsSync(zipPath)) {
+            await fs.promises.unlink(zipPath);
+            console.log(`Removed ${zipPath}`);
+        }
+    } catch (err) {
+        console.warn(`Warning: Could not remove ${zipPath}: ${err.message}`);
+    }
+}
+
+
+const server = http.createServer(async (req, res) => {
+    const requestUrl = url.parse(req.url, true);
+    const pathname = requestUrl.pathname;
+
+    try {
+        if (req.method === 'GET' && pathname === '/') {
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.end(`
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Website to App Packager</title>
+                    <style>
+                        body {
+                            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                            padding: 20px;
+                            background-color: #f0f2f5;
+                            color: #333;
+                            line-height: 1.6;
+                        }
+                        .container {
+                            max-width: 600px;
+                            margin: 40px auto;
+                            background-color: #fff;
+                            padding: 30px;
+                            border-radius: 8px;
+                            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+                        }
+                        h1, h2 {
+                            color: #1a73e8; /* Changed header color */
+                            border-bottom: 1px solid #eee;
+                            padding-bottom: 10px;
+                            margin-bottom: 20px;
+                        }
+                        label {
+                            display: block;
+                            margin-bottom: 8px;
+                            font-weight: 600;
+                        }
+                        input[type="url"] {
+                            width: 100%;
+                            padding: 10px;
+                            margin-bottom: 15px;
+                            border: 1px solid #ccc;
+                            border-radius: 4px;
+                            box-sizing: border-box; /* Include padding in width */
+                        }
+                        button {
+                            padding: 12px 20px;
+                            background-color: #1a73e8; /* Consistent button color */
+                            color: white;
+                            border: none;
+                            border-radius: 4px;
+                            cursor: pointer;
+                            font-size: 1em;
+                            transition: background-color 0.2s ease;
+                        }
+                        button:hover {
+                            background-color: #155ab6; /* Darker blue on hover */
+                        }
+                        button:disabled {
+                            background-color: #ccc;
+                            cursor: not-allowed;
+                        }
+                        #status {
+                            margin-top: 20px;
+                            padding: 10px;
+                            border-radius: 4px;
+                            font-weight: 500;
+                        }
+                        .status-processing { background-color: #e0e0e0; }
+                        .status-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+                        .status-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+                        #downloadLink {
+                            display: none; /* Hidden by default */
+                            margin-top: 15px;
+                            padding: 10px 15px;
+                            background-color: #28a745; /* Green download button */
+                            color: white;
+                            text-decoration: none;
+                            border-radius: 4px;
+                            text-align: center;
+                            transition: background-color 0.2s ease;
+                        }
+                         #downloadLink:hover {
+                            background-color: #218838;
+                         }
+                         hr {
+                            margin: 30px 0;
+                            border: 0;
+                            border-top: 1px solid #eee;
+                         }
+                         .server-download {
+                            margin-top: 30px;
+                         }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>Website to Desktop App Packager</h1>
+                        <form id="packageForm">
+                            <label for="urlInput">Enter Website URL:</label>
+                            <input type="url" id="urlInput" name="url" required placeholder="https://example.com">
+                             <label for="appNameInput">App Name (optional, alphanumeric):</label>
+                            <input type="text" id="appNameInput" name="appName" pattern="[a-zA-Z0-9-]+" placeholder="MyApp (no spaces)">
+                            <button type="submit" id="submitButton">Package App</button>
+                        </form>
+                        <div id="status"></div>
+                        <a id="downloadLink" href="#" download>Download Packaged App (.zip)</a>
+
+                        <div class="server-download">
+                            <h2>Download Server Code</h2>
+                            <p>Click the button below to download the Node.js server code (this file and package.json) as a zip file.</p>
+                            <button onclick="downloadServerCode()">Download Server Code</button>
+                        </div>
+                    </div>
+
+                    <script>
+                        const form = document.getElementById('packageForm');
+                        const urlInput = document.getElementById('urlInput');
+                        const appNameInput = document.getElementById('appNameInput');
+                        const statusDiv = document.getElementById('status');
+                        const downloadLink = document.getElementById('downloadLink');
+                        const submitButton = document.getElementById('submitButton');
+
+                        form.addEventListener('submit', async (event) => {
+                            event.preventDefault();
+                            statusDiv.textContent = 'Starting packaging process... Please wait. This can take several minutes.';
+                            statusDiv.className = 'status-processing'; // Apply processing style
+                            downloadLink.style.display = 'none';
+                            submitButton.disabled = true;
+
+                            const targetUrl = urlInput.value;
+                            const appName = appNameInput.value || 'PackagedApp'; // Default name if empty
+
+                             // Basic validation
+                             if (!targetUrl || !targetUrl.startsWith('http')) {
+                                 statusDiv.textContent = 'Error: Please enter a valid URL starting with http or https.';
+                                 statusDiv.className = 'status-error';
+                                 submitButton.disabled = false;
+                                 return;
+                             }
+                              if (appName && !/^[a-zA-Z0-9-]+$/.test(appName)) {
+                                 statusDiv.textContent = 'Error: App Name can only contain letters, numbers, and hyphens.';
+                                 statusDiv.className = 'status-error';
+                                 submitButton.disabled = false;
+                                 return;
+                             }
+
+
+                            try {
+                                const response = await fetch('/package', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ url: targetUrl, appName: appName })
+                                });
+
+                                const responseData = await response.json(); // Try parsing JSON regardless of status
+
+                                if (!response.ok) {
+                                     throw new Error(responseData.message || \`Packaging failed with status: \${response.status}\`);
+                                }
+
+
+                                statusDiv.textContent = 'Packaging successful! Your download is ready.';
+                                statusDiv.className = 'status-success'; // Apply success style
+                                downloadLink.href = responseData.downloadUrl;
+                                downloadLink.setAttribute('download', responseData.downloadFilename || 'packaged-app.zip'); // Use suggested filename
+                                downloadLink.style.display = 'inline-block'; // Show download link
+
+                            } catch (error) {
+                                statusDiv.textContent = \`Error: \${error.message}\`;
+                                statusDiv.className = 'status-error'; // Apply error style
+                                console.error('Packaging error:', error);
+                            } finally {
+                                submitButton.disabled = false; // Re-enable button
+                            }
+                        });
+
+                        async function downloadServerCode() {
+                             try {
+                                const response = await fetch('/download-server');
+                                if (!response.ok) {
+                                     const errorText = await response.text();
+                                    throw new Error(errorText || 'Failed to download server code.');
+                                }
+                                const blob = await response.blob();
+                                const url = window.URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.style.display = 'none';
+                                a.href = url;
+                                a.download = 'website-packager-server.zip'; // More specific name
+                                document.body.appendChild(a);
+                                a.click();
+                                window.URL.revokeObjectURL(url);
+                                document.body.removeChild(a);
+                            } catch (error) {
+                                alert(\`Error downloading server code: \${error.message}\`);
+                                console.error('Server code download error:', error);
+                            }
+                        }
+                    </script>
+                </body>
+                </html>
+            `);
+        } else if (req.method === 'POST' && pathname === '/package') {
+            let body = '';
+            req.on('data', chunk => { body += chunk.toString(); });
+            req.on('end', async () => {
+                let appId = `app_${randomBytes(6).toString('hex')}`; // Generate a shorter, random ID
+                let appDir = null; // Initialize here for cleanup scope
+                let outputDir = null;
+
+                try {
+                    const { url: targetUrl, appName: rawAppName } = JSON.parse(body);
+
+                    // Validate URL
+                    if (!targetUrl || (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://'))) {
+                        throw new Error('Invalid URL. Must start with http:// or https://');
+                    }
+
+                    // Sanitize and validate App Name
+                    const appName = (rawAppName || 'PackagedApp')
+                        .replace(/[^a-zA-Z0-9-]/g, '') // Remove invalid chars
+                        .substring(0, 50); // Limit length
+
+                    if (!appName) {
+                        throw new Error('Invalid App Name after sanitization.');
+                    }
+
+                    appId = `${appName}_${randomBytes(4).toString('hex')}`; // Use app name in ID
+                    appDir = path.join(APPS_DIR, appId);
+                    outputDir = path.join(PACKAGED_DIR, appId); // Directory to store builds before zipping
+                    const buildOutputDir = path.join(PACKAGED_DIR, appId, 'builds'); // Subdir for actual builds
+                    const zipPath = path.join(PACKAGED_DIR, `${appId}.zip`);
+
+                    console.log(`Starting packaging for ${targetUrl} as ${appName} (${appId})`);
+
+                    // 1. Create directories
+                    await fs.promises.mkdir(appDir, { recursive: true });
+                    await fs.promises.mkdir(buildOutputDir, { recursive: true }); // Create build output dir
+
+                    // 2. Create basic Electron app files
+                    const mainJsContent = `
+const { app, BrowserWindow } = require('electron');
+const path = require('path');
+
+function createWindow () {
+  const mainWindow = new BrowserWindow({
+    width: 1024, // Slightly larger default size
+    height: 768,
+    autoHideMenuBar: true, // Hide default menu bar
+    webPreferences: {
+      // preload: path.join(__dirname, 'preload.js'), // Optional
+      // Security considerations: Disable nodeIntegration and enable contextIsolation if preload scripts are not strictly needed or properly secured.
+      // nodeIntegration: false,
+      // contextIsolation: true,
+    }
+  });
+
+  // Load the target URL provided during packaging
+  mainWindow.loadURL('${targetUrl.replace(/'/g, "\\'")}'); // Escape single quotes in URL
+
+  // Optional: Open DevTools (remove for production)
+  // mainWindow.webContents.openDevTools();
+}
+
+app.whenReady().then(() => {
+  createWindow();
+
+  app.on('activate', function () {
+    // On macOS it's common to re-create a window when the dock icon is clicked and there are no other windows open.
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+// Quit when all windows are closed, except on macOS.
+app.on('window-all-closed', function () {
+  if (process.platform !== 'darwin') app.quit();
+});
+                    `;
+                    await fs.promises.writeFile(path.join(appDir, 'main.js'), mainJsContent);
+
+                    const packageJsonContent = JSON.stringify({
+                        name: appName.toLowerCase(), // Use sanitized name, lowercase
+                        productName: appName, // Use original sanitized name for display
+                        version: '1.0.0',
+                        description: `Desktop app for ${targetUrl}`,
+                        main: 'main.js',
+                        scripts: {
+                            start: 'electron .'
+                        },
+                        author: 'WebPackagerTool',
+                        devDependencies: {
+                            // Electron will be installed via npm install below
+                        }
+                    }, null, 2);
+                    await fs.promises.writeFile(path.join(appDir, 'package.json'), packageJsonContent);
+
+                    // 3. Install Electron dependency
+                    console.log(`[${appId}] Installing Electron...`);
+                    // Use --save-dev to match package.json structure, specify exact version if needed
+                    // Use --no-package-lock or --omit=dev later if space is critical, but install is simpler
+                    // Force electron version consistent with packager if needed
+                    await runCommand('npm install electron --save-dev --omit=optional --no-audit --no-fund', { cwd: appDir });
+                    console.log(`[${appId}] Electron installed.`);
+
+                    // 4. Package the app using electron-packager
+                    console.log(`[${appId}] Packaging app for Windows and Linux...`);
+                    // Use npx to ensure the server's installed electron-packager is used.
+                    // Specify output directory, platforms, architecture.
+                    // --overwrite is useful during development/retries.
+                    // --ignore can exclude unnecessary files (like node_modules/.bin, tests etc if they existed)
+                    const packageCmd = `npx electron-packager . "${appName}" --platform=win32,linux --arch=x64 --out="${buildOutputDir}" --overwrite --ignore="^/node_modules/electron($|/)" --ignore="^/node_modules/\\.bin"`;
+                    await runCommand(packageCmd, { cwd: appDir });
+                    console.log(`[${appId}] App packaged.`);
+
+                    // 5. Zip the packaged output directory
+                    console.log(`[${appId}] Zipping packaged app...`);
+                    const outputZipStream = fs.createWriteStream(zipPath);
+                    const archive = archiver('zip', { zlib: { level: 9 } }); // Good compression
+
+                    // Pipe output stream, handle close/error events
+                    await new Promise((resolve, reject) => {
+                        outputZipStream.on('close', () => {
+                            console.log(`[${appId}] Zip file created: ${zipPath} (${archive.pointer()} total bytes)`);
+                            resolve();
+                        });
+                        outputZipStream.on('error', (err) => reject(new Error(`Zip stream error: ${err.message}`)));
+
+                        archive.on('warning', (err) => {
+                            console.warn(`[${appId}] Archiver warning:`, err);
+                        });
+                        archive.on('error', (err) => reject(new Error(`Archiver error: ${err.message}`)));
+
+                        archive.pipe(outputZipStream);
+                        // Add the 'builds' directory contents directly into the zip archive root
+                        archive.directory(buildOutputDir, false);
+                        archive.finalize();
+                    });
+
+                    console.log(`[${appId}] Zipping complete.`);
+
+                    // 6. Send success response
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        message: 'Packaging successful!',
+                        downloadUrl: `/download/${path.basename(zipPath)}`,
+                        downloadFilename: `${appId}.zip` // Suggest filename to browser
+                    }));
+
+                    // 7. Schedule cleanup (optional - could also clean when downloaded)
+                    // setTimeout(() => cleanup(appId), 5 * 60 * 1000); // Clean up after 5 minutes if not downloaded
+
+                } catch (error) {
+                    console.error(`[${appId || 'package'}] Packaging error:`, error);
+                    // Clean up potentially partially created directories/files on error
+                    if (appId) {
+                       await cleanup(appId); // Attempt cleanup on error
+                    }
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ message: `Packaging failed: ${error.message}` }));
+                }
+            });
+
+        } else if (req.method === 'GET' && pathname.startsWith('/download/')) {
+            const filename = path.basename(pathname); // Extract filename securely
+            const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, ''); // Basic sanitization
+            if (filename !== safeFilename || !safeFilename.endsWith('.zip')) {
+                 res.writeHead(400, { 'Content-Type': 'text/plain' });
+                 res.end('Invalid filename.');
+                 return;
+            }
+
+            const filePath = path.join(PACKAGED_DIR, safeFilename);
+            const appId = path.basename(safeFilename, '.zip'); // Get appId from zip filename
+
+            try {
+                const stats = await fs.promises.stat(filePath);
+                if (!stats.isFile()) {
+                    throw new Error('Not a file');
+                }
+
+                res.writeHead(200, {
+                    'Content-Type': 'application/zip',
+                    'Content-Disposition': `attachment; filename="${safeFilename}"`,
+                    'Content-Length': stats.size
+                });
+                const readStream = fs.createReadStream(filePath);
+
+                // Pipe stream to response
+                readStream.pipe(res);
+
+                // Clean up AFTER download is complete (or connection closes)
+                readStream.on('close', async () => {
+                    console.log(`Download finished for ${safeFilename}. Cleaning up.`);
+                    await cleanup(appId); // Clean up associated files/dirs
+                });
+                readStream.on('error', (err) => {
+                     console.error(`Error reading download file ${safeFilename}:`, err);
+                     // Can't change headers now, but connection will likely close.
+                     // Consider cleanup here too, although 'close' should still fire.
+                });
+
+
+            } catch (err) {
+                 console.error(`Download error for ${safeFilename}: ${err.message}`);
+                 // If file doesn't exist or other error before streaming
+                 if (!res.headersSent) {
+                    res.writeHead(404, { 'Content-Type': 'text/plain' });
+                    res.end('File not found or error accessing file.');
+                 }
+                 // Clean up if the file existed but failed to stream (less likely)
+                 // await cleanup(appId);
+            }
+
+        } else if (req.method === 'GET' && pathname === '/download-server') {
+            const serverZipFilename = 'website-packager-server.zip';
+            const serverZipPath = path.join(__dirname, serverZipFilename); // Temp location for zip
+
+            const output = fs.createWriteStream(serverZipPath);
+            const archive = archiver('zip', { zlib: { level: 9 } });
+
+            archive.pipe(output);
+
+            // Add server.js
+            archive.file(path.join(__dirname, 'server.js'), { name: 'server.js' });
+
+            // Add package.json (create minimal if not exists)
+            const packageJsonPath = path.join(__dirname, 'package.json');
+            if (fs.existsSync(packageJsonPath)) {
+                archive.file(packageJsonPath, { name: 'package.json' });
+            } else {
+                 // Create a minimal package.json reflecting dependencies used IN server.js
+                 const minimalPackageJson = JSON.stringify({
+                    name: "website-packager-server",
+                    version: "1.0.0",
+                    description: "Node.js server to package websites into Electron apps",
+                    main: "server.js",
+                    scripts: {
+                      "start": "node server.js",
+                      "install-deps": "npm install" // Helper script
+                    },
+                    dependencies: {
+                      "archiver": "^6.0.0" // Version used by server
+                    },
+                    devDependencies: {
+                       // electron-packager is needed to RUN the server's packaging function
+                      "electron-packager": "^17.1.2", // Specify version used
+                      "electron": "^28.0.0" // Electron itself is needed by packager/app builds
+                    },
+                     "engines": { "node": ">=16.0.0" } // Add Node engine requirement
+                  }, null, 2);
+                 archive.append(minimalPackageJson, { name: 'package.json' });
+            }
+
+            // Add a README explaining setup
+             const readmeContent = `
+# Website Packager Server
+
+This Node.js server allows you to package a website URL into a basic Electron desktop application for Windows and Linux.
+
+## Setup
+
+1.  **Install Node.js and npm:** Make sure you have Node.js (version 16 or higher recommended) and npm installed. Download from [https://nodejs.org/](https://nodejs.org/).
+2.  **Install Dependencies:** Open a terminal or command prompt in this directory (where \`server.js\` and \`package.json\` are) and run:
+    \`\`\`bash
+    npm install
+    \`\`\`
+    This will install \`archiver\`, \`electron\`, and \`electron-packager\`. Note that downloading Electron binaries might take some time on the first run.
+3.  **Run the Server:**
+    \`\`\`bash
+    node server.js
+    \`\`\`
+4.  **Access the Interface:** Open your web browser and go to \`http://localhost:3000\`.
+
+## Usage
+
+1.  Enter the full URL (including \`http://\` or \`https://\`) of the website you want to package.
+2.  Optionally, provide a simple name for the application (alphanumeric and hyphens only).
+3.  Click "Package App".
+4.  Wait for the packaging process to complete (this can take several minutes).
+5.  A download link for a \`.zip\` file containing the packaged Windows and Linux applications will appear.
+6.  You can also download this server code itself using the "Download Server Code" button.
+
+## Important Notes
+
+*   **Permissions:** The server needs permissions to create directories (\`apps\`, \`packaged\`), write files, and execute \`npm\` and \`npx electron-packager\` commands.
+*   **Resources:** Packaging Electron apps is resource-intensive (CPU, disk, network).
+*   **Cleanup:** Packaged app files (\`.zip\`) and temporary build folders are automatically deleted after the zip file is downloaded or on server error/shutdown. If the server crashes uncleanly, you might need to manually delete the \`apps\` and \`packaged\` directories.
+*   **Security:** This server executes external commands. Run it in a trusted environment. The packaged apps simply load the provided URL; they do not inherently sandbox the web content beyond what Electron provides.
+*   **Cross-Platform Builds:** Building for Windows *from* Linux/macOS (or vice-versa) is attempted but might require additional system dependencies (like Wine for Windows builds on non-Windows) depending on your setup and the specifics of \`electron-packager\`. Building Linux/Windows from the respective OS is generally more reliable.
+`;
+             archive.append(readmeContent, { name: 'README.md' });
+
+
+            // Finalize the archive
+            await archive.finalize();
+
+            // Stream the created zip file back
+            const serverZipStats = await fs.promises.stat(serverZipPath);
+            res.writeHead(200, {
+                'Content-Type': 'application/zip',
+                'Content-Disposition': `attachment; filename="${serverZipFilename}"`,
+                'Content-Length': serverZipStats.size
+            });
+            const readStream = fs.createReadStream(serverZipPath);
+            readStream.pipe(res);
+
+            // Clean up the temporary server zip file after streaming
+            readStream.on('close', () => {
+                fs.promises.unlink(serverZipPath).catch(err => console.error(`Error deleting server code zip: ${err}`));
+            });
+             readStream.on('error', (err) => {
+                console.error(`Error streaming server code zip: ${err}`);
+                fs.promises.unlink(serverZipPath).catch(err => console.error(`Error deleting server code zip after stream error: ${err}`));
+             });
+
+        } else {
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('Not Found');
+        }
+    } catch (err) {
+         console.error("Unhandled server error:", err);
+         // Ensure response isn't already sent
+         if (!res.headersSent) {
+             res.writeHead(500, { 'Content-Type': 'text/plain' });
+             res.end('Internal Server Error');
+         } else {
+            // If headers are sent, we can only try to end the response abruptly.
+            res.end();
+         }
+    }
+});
+
+// Graceful shutdown handler
+async function shutdown(signal) {
+    console.log(`\nReceived ${signal}. Shutting down server and cleaning up...`);
+    try {
+        // Close the server first to stop accepting new connections
+        await new Promise((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+        console.log('Server closed.');
+
+        // Attempt to clean up temporary directories
+        console.log('Cleaning up working directories...');
+        await fs.promises.rm(APPS_DIR, { recursive: true, force: true });
+        await fs.promises.rm(PACKAGED_DIR, { recursive: true, force: true });
+        console.log('Cleanup complete.');
+        process.exit(0);
+    } catch (err) {
+        console.error("Error during shutdown cleanup:", err);
+        process.exit(1);
+    }
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+// Ensure necessary base directories exist on startup
+Promise.all([
+    fs.promises.mkdir(APPS_DIR, { recursive: true }),
+    fs.promises.mkdir(PACKAGED_DIR, { recursive: true })
+]).then(() => {
+    server.listen(PORT, () => {
+        console.log(`Server listening on http://localhost:${PORT}`);
+        console.log('------------------------------------------------------------------');
+        console.log('IMPORTANT: This server requires Node.js, npm, and network access.');
+        console.log('Run "npm install" in this directory to install dependencies:');
+        console.log('  (archiver, electron, electron-packager)');
+        console.log('Packaging can take several minutes and consume resources.');
+        console.log('Press Ctrl+C to shut down gracefully and clean up temporary files.');
+        console.log('------------------------------------------------------------------');
+    });
+}).catch(err => {
+    console.error("FATAL: Failed to create necessary directories:", err);
+    process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Application specific logging, throwing an error, or other logic here
+});
+
+{
+  "name": "website-packager-server",
+  "version": "1.0.0",
+  "description": "Node.js server to package websites into Electron apps using electron-packager",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "install-deps": "npm install",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "electron",
+    "packager",
+    "website",
+    "desktop",
+    "app",
+    "node"
+  ],
+  "author": "AI Assistant",
+  "license": "ISC",
+  "dependencies": {
+    "archiver": "^6.0.1"
+  },
+  "devDependencies": {
+    "electron": "^28.2.3",
+    "electron-packager": "^17.1.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
+
