@@ -126,11 +126,22 @@ const server = http.createServer((req, res) => {
                 }
                 const packageCmd = `npx electron-packager . "${productName}" --platform=win32,linux --arch=x64 --out="${outputDir}" --overwrite ${iconArg}`;
                 await new Promise((resolve, reject) => {
-                    exec(packageCmd, { cwd: appDir, timeout: 600000 }, (error, stdout, stderr) => { 
+                    const execOptions = {
+                        cwd: appDir,
+                        timeout: 600000, 
+                        env: {
+                            ...process.env, 
+                            WINE: 'wine' 
+                        }
+                    };
+                    exec(packageCmd, execOptions, (error, stdout, stderr) => { 
                         if (error) {
                             console.error(`[${appId}] electron-packager error: ${stderr}`);
                             let detail = stderr;
                             if (stderr.includes('Unable to download')) detail = 'Network error during Electron download for packaging.';
+                            if ((process.platform !== 'win32') && stderr.includes('wine')) {
+                                detail = 'Wine is required to build Windows packages on non-Windows platforms. Please install Wine (e.g., `sudo apt install wine` on Debian/Ubuntu) or build on Windows. Full error: ' + stderr;
+                            }
                             return reject(new Error(`Failed to package app: ${detail}`));
                         }
                         console.log(`[${appId}] electron-packager stdout: ${stdout}`);
