@@ -70,7 +70,7 @@ const server = http.createServer((req, res) => {
                             downloadLink.style.display = 'block';
 
                         } catch (error) {
-                            statusDiv.textContent = \`Error: \${error.message}\`;
+                            statusDiv.textContent = `Error: ${error.message}`;
                             console.error('Packaging error:', error);
                         }
                     });
@@ -92,7 +92,7 @@ const server = http.createServer((req, res) => {
                             window.URL.revokeObjectURL(url);
                             document.body.removeChild(a);
                         } catch (error) {
-                            alert(\`Error downloading server code: \${error.message}\`);
+                            alert(`Error downloading server code: ${error.message}`);
                             console.error('Server code download error:', error);
                         }
                     }
@@ -388,3 +388,8 @@ process.on('SIGINT', () => {
     });
 });
 
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Application specific logging, throwing an error, or other logic here
+});
